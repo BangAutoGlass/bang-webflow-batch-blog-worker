@@ -1,0 +1,54 @@
+services:
+  - type: worker
+    name: bang-webflow-batch-blog-worker
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: WORKER_ENABLED
+        value: "true"
+      - key: WORKER_ID
+        value: render-batch-blog-worker
+      - key: KEEP_ALIVE_WHEN_DONE
+        value: "true"
+      - key: AUTO_DISCOVER_JOBS
+        value: "true"
+      - key: WORKER_POLL_INTERVAL_MS
+        value: "60000"
+      - key: WORKER_IDLE_POLL_INTERVAL_MS
+        value: "120000"
+      - key: WORKER_ERROR_SLEEP_MS
+        value: "30000"
+      - key: OPENAI_BATCH_MIN_POLL_INTERVAL_MS
+        value: "60000"
+      - key: BATCH_MAX_ROWS
+        value: "500"
+      - key: PUBLISH_BATCH_SIZE
+        value: "10"
+      - key: PUBLISH_CONCURRENCY
+        value: "5"
+      - key: EDGE_REQUEST_TIMEOUT_SECONDS
+        value: "180"
+      - key: EDGE_MAX_RETRIES
+        value: "3"
+      - key: WEBFLOW_REQUEST_TIMEOUT_SECONDS
+        value: "120"
+      - key: WEBFLOW_MAX_RETRIES
+        value: "4"
+      - key: LOG_LEVEL
+        value: info
+      - key: EDGE_FUNCTION_URL
+        sync: false
+      - key: WORKER_SECRET
+        sync: false
+      - key: WEBFLOW_API_TOKEN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: BATCH_JOB_ID
+        sync: false
