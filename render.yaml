@@ -3,7 +3,7 @@ services:
     name: bang-webflow-batch-blog-worker
     runtime: node
     plan: starter
-    buildCommand: npm install && npm run build
+    buildCommand: npm ci && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_VERSION
