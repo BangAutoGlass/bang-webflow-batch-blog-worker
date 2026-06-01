@@ -9,10 +9,13 @@ const DEFAULT_ERROR_SLEEP_MS = 30_000
 const DEFAULT_OPENAI_BATCH_MIN_POLL_INTERVAL_MS = 60_000
 const DEFAULT_WEBFLOW_API_BASE = "https://api.webflow.com/v2"
 
-// CSV-safe Webflow publish mode.
-// These are the only CMS fieldData keys confirmed from the exported Blog Posts CSV.
-// The rejected/generated-only fields are intentionally stripped before publishing:
-// post-body, post-body-2, meta_title, meta_description, faqHtml, ctaText, imagePrompt, notes, tags.
+// Confirmed Webflow publish field allowlist.
+// Webflow response payload confirmed these API slugs for the Blog Posts collection:
+// - Post Body => rich-text
+// - meta title => meta-title
+// - meta description => meta-description
+// The generated-only fields below are still stripped because Webflow rejected them:
+// faqHtml, ctaText, imagePrompt, notes, tags, post-body, post-body-2, meta_title, meta_description.
 const CSV_SAFE_WEBFLOW_FIELD_SLUGS = new Set([
   "name",
   "slug",
@@ -20,7 +23,10 @@ const CSV_SAFE_WEBFLOW_FIELD_SLUGS = new Set([
   "author-name",
   "publication-date",
   "category",
+  "rich-text",
   "post-summary",
+  "meta-title",
+  "meta-description",
   "make",
   "model",
   "service-label",
@@ -152,7 +158,7 @@ function compactObject(value: JsonRecord) {
   return output
 }
 
-function sanitizeWebflowFieldDataForCsvSafePublish(fieldData: JsonRecord) {
+function sanitizeWebflowFieldDataForConfirmedPublish(fieldData: JsonRecord) {
   const safeFieldData: JsonRecord = {}
 
   for (const [key, value] of Object.entries(fieldData)) {
@@ -170,10 +176,10 @@ function getDroppedWebflowFieldSlugs(originalFieldData: JsonRecord, safeFieldDat
   return Object.keys(originalFieldData).filter((key) => !(key in safeFieldData))
 }
 
-function sanitizePublishRequestForCsvSafeWebflow(request: JsonRecord): { request: JsonRecord; droppedFieldSlugs: string[] } {
+function sanitizePublishRequestForConfirmedWebflow(request: JsonRecord): { request: JsonRecord; droppedFieldSlugs: string[] } {
   const originalBody = asRecord(request.body)
   const originalFieldData = asRecord(originalBody.fieldData || request.fieldData || request.finalFieldData)
-  const safeFieldData = sanitizeWebflowFieldDataForCsvSafePublish(originalFieldData)
+  const safeFieldData = sanitizeWebflowFieldDataForConfirmedPublish(originalFieldData)
   const droppedFieldSlugs = getDroppedWebflowFieldSlugs(originalFieldData, safeFieldData)
 
   return {
@@ -190,8 +196,8 @@ function sanitizePublishRequestForCsvSafeWebflow(request: JsonRecord): { request
   }
 }
 
-function sanitizePublishItemForCsvSafeWebflow(item: PublishItem): { item: PublishItem; droppedFieldSlugs: string[] } {
-  const sanitized = sanitizePublishRequestForCsvSafeWebflow(asRecord(item.request))
+function sanitizePublishItemForConfirmedWebflow(item: PublishItem): { item: PublishItem; droppedFieldSlugs: string[] } {
+  const sanitized = sanitizePublishRequestForConfirmedWebflow(asRecord(item.request))
   return {
     item: {
       ...item,
@@ -499,11 +505,13 @@ function shouldSkipWebflowPublish(item: PublishItem) {
 function extractWebflowItemId(value: unknown) {
   const record = asRecord(value)
   const data = asRecord(record.data)
-  return firstString(record.id, record._id, data.id, data._id)
+  const items = Array.isArray(record.items) ? record.items : []
+  const firstItem = asRecord(items[0])
+  return firstString(record.id, record._id, data.id, data._id, firstItem.id, firstItem._id)
 }
 
 async function postToWebflow(item: PublishItem) {
-  const sanitized = sanitizePublishRequestForCsvSafeWebflow(asRecord(item.request))
+  const sanitized = sanitizePublishRequestForConfirmedWebflow(asRecord(item.request))
   const request = sanitized.request
   const apiBase = firstString(request.apiBase, DEFAULT_WEBFLOW_API_BASE)
   const path = firstString(request.path)
@@ -593,12 +601,12 @@ async function failPublish(item: PublishItem, error: unknown) {
 async function processPublishItem(item: PublishItem) {
   const rowId = firstString(asRecord(item.row).id)
   const title = firstString(asRecord(item.row).webflow_name, asRecord(item.row).name_seed)
-  const sanitized = sanitizePublishItemForCsvSafeWebflow(item)
+  const sanitized = sanitizePublishItemForConfirmedWebflow(item)
   const safeItem = sanitized.item
 
   if (sanitized.droppedFieldSlugs.length) {
     logJson({
-      event: "webflow_fielddata_sanitized",
+      event: "webflow_fielddata_confirmed_sanitized",
       rowId,
       title,
       droppedFieldSlugs: sanitized.droppedFieldSlugs,
