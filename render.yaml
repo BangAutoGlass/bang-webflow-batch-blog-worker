@@ -26,12 +26,16 @@ services:
         value: "60000"
       - key: BATCH_MAX_ROWS
         value: "500"
+      - key: BODY_BATCH_MAX_ROWS
+        value: "500"
+      - key: FIELD_BATCH_MAX_ROWS
+        value: "100"
       - key: PUBLISH_BATCH_SIZE
         value: "10"
       - key: PUBLISH_CONCURRENCY
         value: "5"
       - key: EDGE_REQUEST_TIMEOUT_SECONDS
-        value: "180"
+        value: "600"
       - key: EDGE_MAX_RETRIES
         value: "3"
       - key: WEBFLOW_REQUEST_TIMEOUT_SECONDS

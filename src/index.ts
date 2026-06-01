@@ -1,6 +1,8 @@
 const DEFAULT_EDGE_REQUEST_TIMEOUT_SECONDS = 180
 const DEFAULT_WEBFLOW_REQUEST_TIMEOUT_SECONDS = 120
 const DEFAULT_BATCH_MAX_ROWS = 500
+const DEFAULT_BODY_BATCH_MAX_ROWS = 500
+const DEFAULT_FIELD_BATCH_MAX_ROWS = 100
 const DEFAULT_PUBLISH_BATCH_SIZE = 10
 const DEFAULT_PUBLISH_CONCURRENCY = 5
 const DEFAULT_POLL_INTERVAL_MS = 60_000
@@ -447,9 +449,9 @@ function edgeJobStatus(response: EdgeResponse): JobStatus | "" {
   return firstString(asRecord(response.job).status) as JobStatus | ""
 }
 
-function shouldThrottleBatchPoll(jobId: string, phase: BatchPhase) {
+function shouldThrottleBatchPoll(jobId: string, phase: BatchPhase, batchId = "") {
   const minPollMs = numberEnv("OPENAI_BATCH_MIN_POLL_INTERVAL_MS", DEFAULT_OPENAI_BATCH_MIN_POLL_INTERVAL_MS, 10_000, 3_600_000)
-  const key = `${jobId}:${phase}`
+  const key = `${jobId}:${phase}:${batchId || "active"}`
   const now = Date.now()
   const last = lastBatchPollAtByJobPhase.get(key) || 0
   if (now - last < minPollMs) return true
@@ -457,32 +459,74 @@ function shouldThrottleBatchPoll(jobId: string, phase: BatchPhase) {
   return false
 }
 
+function getBatchMaxRowsForPhase(phase: BatchPhase) {
+  const fallback = numberEnv("BATCH_MAX_ROWS", DEFAULT_BATCH_MAX_ROWS, 1, 50_000)
+  if (phase === "body_generation") return numberEnv("BODY_BATCH_MAX_ROWS", DEFAULT_BODY_BATCH_MAX_ROWS, 1, 50_000)
+  return numberEnv("FIELD_BATCH_MAX_ROWS", Math.min(DEFAULT_FIELD_BATCH_MAX_ROWS, fallback), 1, 50_000)
+}
+
+function getKnownBatchIdForPhase(job: BatchJob, phase: BatchPhase) {
+  return phase === "body_generation" ? firstString(job.body_batch_id) : firstString(job.field_batch_id)
+}
+
 async function submitOpenAIBatch(jobId: string, phase: BatchPhase) {
-  const maxRows = numberEnv("BATCH_MAX_ROWS", DEFAULT_BATCH_MAX_ROWS, 1, 50_000)
+  const maxRows = getBatchMaxRowsForPhase(phase)
   logJson({ event: "submit_openai_batch", jobId, phase, maxRows })
-  return await callEdge({
+  const response = await callEdge({
     action: "submit_openai_batch",
     jobId,
     phase,
     maxRows,
     includeRows: false,
   })
+
+  const batch = asRecord(response.batch)
+  logJson({
+    event: "submit_openai_batch_result",
+    jobId,
+    phase,
+    edgeJobStatus: edgeJobStatus(response),
+    batchId: firstString(batch.id),
+    batchStatus: firstString(batch.status),
+    openaiBatchId: firstString(batch.openaiBatchId, batch.openai_batch_id),
+    inputRequestCount: Number(batch.inputRequestCount || batch.input_request_count || 0),
+  })
+
+  return response
 }
 
-async function pollOpenAIBatch(jobId: string, phase: BatchPhase) {
-  if (shouldThrottleBatchPoll(jobId, phase)) {
-    logJson({ event: "poll_throttled", jobId, phase }, "debug")
+async function pollOpenAIBatch(jobId: string, phase: BatchPhase, batchId = "") {
+  if (shouldThrottleBatchPoll(jobId, phase, batchId)) {
+    logJson({ event: "poll_throttled", jobId, phase, batchId }, "debug")
     return null
   }
 
-  logJson({ event: "poll_openai_batch", jobId, phase })
-  return await callEdge({
+  logJson({ event: "poll_openai_batch", jobId, phase, batchId })
+  const response = await callEdge({
     action: "poll_openai_batch",
     jobId,
     phase,
+    ...(batchId ? { batchId } : {}),
     autoParse: true,
     includeRows: false,
   })
+
+  const batch = asRecord(response.batch)
+  logJson({
+    event: "poll_openai_batch_result",
+    jobId,
+    phase,
+    requestedBatchId: batchId,
+    edgeJobStatus: edgeJobStatus(response),
+    batchId: firstString(batch.id),
+    batchStatus: firstString(batch.status),
+    openaiBatchId: firstString(batch.openaiBatchId, batch.openai_batch_id),
+    lastPolledAt: firstString(batch.lastPolledAt, batch.last_polled_at),
+    completedAt: firstString(batch.completedAt, batch.completed_at),
+    parsedAt: firstString(batch.parsedAt, batch.parsed_at),
+  })
+
+  return response
 }
 
 async function claimPublishRows(jobId: string) {
@@ -683,7 +727,7 @@ async function handleJob(job: BatchJob) {
   }
 
   if (status === "body_batch_submitted" || status === "body_batch_running") {
-    const response = await pollOpenAIBatch(jobId, "body_generation")
+    const response = await pollOpenAIBatch(jobId, "body_generation", getKnownBatchIdForPhase(job, "body_generation"))
     return { didWork: Boolean(response), status: response ? edgeJobStatus(response) || status : status }
   }
 
@@ -693,7 +737,7 @@ async function handleJob(job: BatchJob) {
   }
 
   if (status === "field_batch_submitted" || status === "field_batch_running") {
-    const response = await pollOpenAIBatch(jobId, "title_and_field_generation")
+    const response = await pollOpenAIBatch(jobId, "title_and_field_generation", getKnownBatchIdForPhase(job, "title_and_field_generation"))
     return { didWork: Boolean(response), status: response ? edgeJobStatus(response) || status : status }
   }
 
@@ -763,6 +807,8 @@ async function mainLoop() {
     edgeFunctionUrl: getRequiredEnv("EDGE_FUNCTION_URL"),
     autoDiscoverJobs: boolEnv("AUTO_DISCOVER_JOBS", true),
     batchMaxRows: numberEnv("BATCH_MAX_ROWS", DEFAULT_BATCH_MAX_ROWS, 1, 50_000),
+    bodyBatchMaxRows: getBatchMaxRowsForPhase("body_generation"),
+    fieldBatchMaxRows: getBatchMaxRowsForPhase("title_and_field_generation"),
     publishBatchSize: numberEnv("PUBLISH_BATCH_SIZE", DEFAULT_PUBLISH_BATCH_SIZE, 1, 100),
     publishConcurrency: numberEnv("PUBLISH_CONCURRENCY", DEFAULT_PUBLISH_CONCURRENCY, 1, 25),
   })
