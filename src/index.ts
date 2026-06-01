@@ -9,6 +9,26 @@ const DEFAULT_ERROR_SLEEP_MS = 30_000
 const DEFAULT_OPENAI_BATCH_MIN_POLL_INTERVAL_MS = 60_000
 const DEFAULT_WEBFLOW_API_BASE = "https://api.webflow.com/v2"
 
+// CSV-safe Webflow publish mode.
+// These are the only CMS fieldData keys confirmed from the exported Blog Posts CSV.
+// The rejected/generated-only fields are intentionally stripped before publishing:
+// post-body, post-body-2, meta_title, meta_description, faqHtml, ctaText, imagePrompt, notes, tags.
+const CSV_SAFE_WEBFLOW_FIELD_SLUGS = new Set([
+  "name",
+  "slug",
+  "article-author",
+  "author-name",
+  "publication-date",
+  "category",
+  "post-summary",
+  "make",
+  "model",
+  "service-label",
+  "city",
+  "state",
+])
+
+
 type JsonRecord = Record<string, unknown>
 type BatchPhase = "body_generation" | "title_and_field_generation"
 type JobStatus =
@@ -130,6 +150,55 @@ function compactObject(value: JsonRecord) {
     output[key] = innerValue
   }
   return output
+}
+
+function sanitizeWebflowFieldDataForCsvSafePublish(fieldData: JsonRecord) {
+  const safeFieldData: JsonRecord = {}
+
+  for (const [key, value] of Object.entries(fieldData)) {
+    if (!CSV_SAFE_WEBFLOW_FIELD_SLUGS.has(key)) continue
+    if (value === undefined || value === null) continue
+    if (typeof value === "string" && value.trim() === "") continue
+    if (Array.isArray(value) && value.length === 0) continue
+    safeFieldData[key] = value
+  }
+
+  return safeFieldData
+}
+
+function getDroppedWebflowFieldSlugs(originalFieldData: JsonRecord, safeFieldData: JsonRecord) {
+  return Object.keys(originalFieldData).filter((key) => !(key in safeFieldData))
+}
+
+function sanitizePublishRequestForCsvSafeWebflow(request: JsonRecord): { request: JsonRecord; droppedFieldSlugs: string[] } {
+  const originalBody = asRecord(request.body)
+  const originalFieldData = asRecord(originalBody.fieldData || request.fieldData || request.finalFieldData)
+  const safeFieldData = sanitizeWebflowFieldDataForCsvSafePublish(originalFieldData)
+  const droppedFieldSlugs = getDroppedWebflowFieldSlugs(originalFieldData, safeFieldData)
+
+  return {
+    request: {
+      ...request,
+      body: compactObject({
+        ...originalBody,
+        fieldData: safeFieldData,
+      }),
+      fieldData: safeFieldData,
+      finalFieldData: safeFieldData,
+    },
+    droppedFieldSlugs,
+  }
+}
+
+function sanitizePublishItemForCsvSafeWebflow(item: PublishItem): { item: PublishItem; droppedFieldSlugs: string[] } {
+  const sanitized = sanitizePublishRequestForCsvSafeWebflow(asRecord(item.request))
+  return {
+    item: {
+      ...item,
+      request: sanitized.request,
+    } satisfies PublishItem,
+    droppedFieldSlugs: sanitized.droppedFieldSlugs,
+  }
 }
 
 function safeErrorMessage(error: unknown, maxLength = 5000) {
@@ -434,7 +503,8 @@ function extractWebflowItemId(value: unknown) {
 }
 
 async function postToWebflow(item: PublishItem) {
-  const request = asRecord(item.request)
+  const sanitized = sanitizePublishRequestForCsvSafeWebflow(asRecord(item.request))
+  const request = sanitized.request
   const apiBase = firstString(request.apiBase, DEFAULT_WEBFLOW_API_BASE)
   const path = firstString(request.path)
   const method = firstString(request.method, "POST")
@@ -523,20 +593,32 @@ async function failPublish(item: PublishItem, error: unknown) {
 async function processPublishItem(item: PublishItem) {
   const rowId = firstString(asRecord(item.row).id)
   const title = firstString(asRecord(item.row).webflow_name, asRecord(item.row).name_seed)
+  const sanitized = sanitizePublishItemForCsvSafeWebflow(item)
+  const safeItem = sanitized.item
+
+  if (sanitized.droppedFieldSlugs.length) {
+    logJson({
+      event: "webflow_fielddata_sanitized",
+      rowId,
+      title,
+      droppedFieldSlugs: sanitized.droppedFieldSlugs,
+      allowedFieldSlugs: Array.from(CSV_SAFE_WEBFLOW_FIELD_SLUGS),
+    }, "warn")
+  }
 
   try {
-    if (shouldSkipWebflowPublish(item)) {
+    if (shouldSkipWebflowPublish(safeItem)) {
       logJson({ event: "publish_skipped", rowId, title })
-      return await completePublish(item, { skipped: true, title }, true)
+      return await completePublish(safeItem, { skipped: true, title }, true)
     }
 
     logJson({ event: "webflow_publish_start", rowId, title })
-    const webflowResponse = await postToWebflow(item)
-    const result = await completePublish(item, webflowResponse, false)
+    const webflowResponse = await postToWebflow(safeItem)
+    const result = await completePublish(safeItem, webflowResponse, false)
     logJson({ event: "webflow_publish_success", rowId, webflowItemId: result.webflowItemId })
     return result
   } catch (error) {
-    const result = await failPublish(item, error)
+    const result = await failPublish(safeItem, error)
     logJson({ event: "webflow_publish_error", rowId, error: result.error }, "error")
     return result
   }
